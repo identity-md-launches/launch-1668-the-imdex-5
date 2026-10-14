@@ -27,7 +27,7 @@ contract MockERC20 {
         return true;
     }
 
-    function transfer(address to, uint256 amount) external returns (bool) {
+    function transfer(address to, uint256 amount) public virtual returns (bool) {
         if (failMode == 1) revert("transfer disabled");
         if (failMode == 2) return false;
         if (failMode == 3) _burnGas();

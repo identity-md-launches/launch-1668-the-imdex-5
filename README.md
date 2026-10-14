@@ -12,7 +12,7 @@ Contracts only: no launch token, pool or website.
 
 | Path | What |
 | --- | --- |
-| `src/Imdex5.sol` | The index. One contract, no constructor arguments, 22.0 KB of runtime. |
+| `src/Imdex5.sol` | The index. One contract, no constructor arguments, 22,656 bytes of runtime. |
 | `src/OracleAttestation.sol` | The protocol's `OracleAttestation` library and `OracleAttestationConsumer`, copied whole from the oracle-consumer reference. |
 | `src/Interfaces.sol` | The slices of the Uniswap v4 `PoolManager`, the launch registries and the Intake that the index calls. |
 | `test/Imdex5.t.sol` | Behaviour, failure and attack tests against mocks. |
@@ -78,15 +78,19 @@ the brief's value, so nothing differs and nothing was substituted.
 
 ### Accounting
 
-Internal, never `balanceOf`:
+Internal accounting, with swap receipts measured using the output token's `balanceOf` before
+and after the PoolManager's `take`:
 
 - `held[coin]`: units of each coin the index owns for its holders.
 - `idleImd`: IMD a rebalance left unspent. The holders'.
 - `feeImd`: fees. Outside every mint, redeem and rebalance; it only ever pays the oracle price
   (0.5 IMD) and caller rewards (0.25 IMD). `fund(amount)` lets anyone add to it.
 
-The IMD the contract holds always equals `idleImd + feeImd` (a test asserts this after every
-operation). A coin's balance may exceed `held[coin]` by the amounts recorded as `owed`.
+After accounted operations, the IMD the contract holds equals `idleImd + feeImd` plus any IMD
+recorded as `owed`. Each coin's balance equals `held[coin]` plus the amounts recorded as `owed`.
+The invariant suites check these equalities with both plain coins and a SwarmCity mock that keeps
+2% of transfers out of the PoolManager. `held` increases only by what actually arrives, and
+`Swapped.amountOut` reports that receipt, including for rebalance buys.
 
 ### Mint
 
@@ -97,13 +101,24 @@ operation). A coin's balance may exceed `held[coin]` by the amounts recorded as 
   every IMD the contract holds is accounted for. Reverts if a buy reverts, returns nothing (a
   dust input the pool fee swallows whole is a failed buy, not a share for nothing) or returns
   under its `minOut`. `minOut` has one entry per coin of the list, in list order.
-- `mint(shares, maxImdIn)`: supply > 0. Pulls `maxImdIn` first, buys exactly `held * f` of every
+- `mint(shares, maxImdIn)`: supply > 0. Pulls `maxImdIn` first, requests exactly `held * f` of every
   coin (`f = shares / totalSupply`, rounded up), adds `idleImd * f` (rounded up) to `idleImd`,
-  adds 0.50% of the buys' cost to `feeImd`, mints, and refunds the unspent IMD. Reverts if the
-  total exceeds `maxImdIn`, if the total is zero (a share is never issued for nothing), or if a
-  buy reverts or fills short. No price is read; no cap. A list coin whose holding is zero (its
+  adds 0.50% of the buys' cost to `feeImd`, mints, and refunds the unspent IMD. Starts with
+  `minted = shares`; for each short fill, reduces it to the smaller of its current value and
+  `floor(shares * received / need)`. It issues and emits `minted`. Reverts if the total exceeds
+  `maxImdIn`, if the total is zero (a share is never issued for nothing), if a buy reverts or
+  delivers nothing, or if the resulting shares round to zero. No price is read; no cap.
+  A list coin whose holding is zero (its
   buy was skipped at the last rebalance) is not bought by `mint`, exactly as `held * f` says;
   the next `rebalance` buys it from idle IMD.
+
+While SwarmCity is held, its 2% transfer tax normally means about 98% of the requested later-mint
+shares are issued (subject to integer rounding). The buyer still pays for every buy made, the
+idle IMD contribution calculated from the requested shares, and the 0.50% fee on the buys' cost.
+Other coins bought in excess of the issued fraction remain backing the index for its holders.
+`maxImdIn` limits the payment; it is not a minimum-share guarantee. Read `Minted.shares` for the
+amount actually issued. The first mint's share calculation remains IMD paid less its 0.50% fee;
+its coin receipts and `minOut` checks use the amounts actually received.
 
 ### Redeem
 
@@ -210,3 +225,20 @@ Nothing is owned. After launch:
 - If the oracle never calls back, anyone may `closeRequest()` after 2 days.
 - The launch deploys `Imdex5` from its bytecode as built, with no arguments. No `launch.json` is
   written here; the manifest step writes it.
+
+## Changes for the corrected launch
+
+Every change from the supplied launch 1636 project is listed here; audit reproduction and
+validation details are in `ADAPTATION.md`.
+
+| File | Change and reason |
+| --- | --- |
+| `src/Imdex5.sol` | `_swap` measures the balance increase around `take`, returning and emitting the actual receipt so transfer tax cannot inflate holdings. `_mintMore` issues the least delivered fraction of requested shares, rejects zero output/zero resulting shares, and emits the actual shares while charging all buys and the original idle contribution and fees. The mint NatSpec describes this behavior. |
+| `test/mocks/Mocks.sol` | Makes the mock's `transfer` public and virtual so the taxed mock can reuse its balances and failure modes. Plain-token behavior is unchanged. |
+| `test/mocks/PoolTaxERC20.sol` | Adds a mock that keeps 2% of transfers from the PoolManager; transfers from the index remain untaxed. |
+| `test/Imdex5.t.sol` | Replaces the obsolete nonzero short-fill revert expectation with fractional issuance and balance assertions; retains the failed-buy revert check. |
+| `test/Imdex5ShortFill.t.sol` | Adds deterministic and fuzz tests for short fills, the least fill across all coins, full payment and refunds, zero output, zero rounded shares, payment limits and atomic rollback. |
+| `test/Imdex5TaxedCoin.t.sol` | Adds the first receipt and last-holder regressions, the complete three-holder lifecycle with two later mints and an IMD exit, fuzzed lifecycles, actual-output events and minimums, rebalance buys, and funded owed/claim coverage. Each lifecycle step checks balances against held plus owed; each mint checks backing against every holding. |
+| `test/Imdex5.invariant.t.sol` | Checks minted shares against actual receipts and proportional backing; runs the existing invariants both with plain tokens and with the taxed SwarmCity mock. The held-plus-owed invariant is retained. |
+| `README.md` | Updates the measured runtime size, corrects accounting and mint descriptions, documents the short-fill payment consequence and lists this change set. |
+| `ADAPTATION.md` | Records the changes, imported findings, reproductions, unchanged launch requirements and local validation. |

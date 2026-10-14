@@ -182,9 +182,11 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
         IPoolManager(POOL_MANAGER).unlock(abi.encode(Op.MintFirst, msg.sender, imdIn, 0, 0, minOut));
     }
 
-    /// @notice Mints `shares` by buying exactly the proportional amount of every coin, plus the
+    /// @notice Mints up to `shares` by buying the proportional amount of every coin, plus the
     /// proportional idle IMD, plus 0.50% of the buys' cost as fee. `maxImdIn` is pulled first and
-    /// the unspent part refunded; reverts if the cost exceeds it, is nothing, or a buy fails.
+    /// the unspent part refunded. Short fills reduce shares to the least delivered fraction;
+    /// every buy is still paid. Reverts if the cost exceeds the limit, is nothing, a buy fails,
+    /// a buy delivers nothing, or the delivered fraction rounds to zero shares.
     function mint(uint256 shares, uint256 maxImdIn) external nonReentrant {
         if (totalSupply() == 0) revert FirstMintOnly();
         if (shares == 0) revert ZeroAmount();
@@ -384,6 +386,7 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
 
     function _mintMore(address caller, uint256 shares, uint256 maxImdIn) private {
         uint256 supply = totalSupply();
+        uint256 minted = shares;
         uint256 cost = 0;
         uint256 n = _coins.length;
         for (uint256 i = 0; i < n; ++i) {
@@ -391,7 +394,10 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
             uint256 need = Math.mulDiv(held[coin.token], shares, supply, Math.Rounding.Ceil);
             if (need == 0) continue;
             (uint256 amountIn, uint256 out) = _swap(coin.token, coin.hook, true, need, true, false);
-            if (out < need) revert BuyFailed(coin.token);
+            if (out < need) {
+                minted = Math.min(minted, Math.mulDiv(shares, out, need));
+                if (minted == 0) revert BuyFailed(coin.token);
+            }
             cost += amountIn;
             held[coin.token] += out;
         }
@@ -402,9 +408,9 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
         uint256 total = cost + idlePart + fee;
         if (total == 0) revert NothingToPay();
         if (total > maxImdIn) revert TooExpensive(total);
-        _mint(caller, shares);
+        _mint(caller, minted);
         if (maxImdIn > total) IERC20(IMD).safeTransfer(caller, maxImdIn - total);
-        emit Minted(caller, shares, total);
+        emit Minted(caller, minted, total);
     }
 
     function _redeemToImd(address caller, uint256 shares, uint256 minImdOut, uint256 supply) private {
@@ -535,7 +541,11 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
             IERC20(inCur).safeTransfer(POOL_MANAGER, amountIn);
             IPoolManager(POOL_MANAGER).settle();
         }
-        if (amountOut > 0) IPoolManager(POOL_MANAGER).take(outCur, address(this), amountOut);
+        if (amountOut > 0) {
+            uint256 before = IERC20(outCur).balanceOf(address(this));
+            IPoolManager(POOL_MANAGER).take(outCur, address(this), amountOut);
+            amountOut = IERC20(outCur).balanceOf(address(this)) - before;
+        }
         // a hook that left its own delta unsettled would revert the whole unlock later; fail here
         if (IPoolManager(POOL_MANAGER).exttload(NONZERO_DELTA_COUNT_SLOT) != 0) revert BadDelta();
         emit Swapped(token, buy, amountIn, amountOut);

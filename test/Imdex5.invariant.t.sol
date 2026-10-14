@@ -3,11 +3,13 @@ pragma solidity 0.8.26;
 
 import {CommonBase} from "forge-std/Base.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Imdex5} from "../src/Imdex5.sol";
 import {IPoolManager} from "../src/Interfaces.sol";
 import {OracleAttestation} from "../src/OracleAttestation.sol";
 import {Imdex5Base} from "./Imdex5Base.sol";
 import {MockERC20, MockIntake, MockPoolManager, ReentrantHook} from "./mocks/Mocks.sol";
+import {PoolTaxERC20} from "./mocks/PoolTaxERC20.sol";
 
 /// @dev Drives the index with bounded inputs from three actors, toggles pool and coin failures,
 /// runs the oracle round through the mocked Intake, and asserts per-call facts about `feeImd`.
@@ -114,14 +116,28 @@ contract Imdex5Handler is CommonBase, StdUtils {
         uint256 feeBefore = index.feeImd();
         uint256 imdBefore = imd.balanceOf(who);
         uint256 sharesBefore = index.balanceOf(who);
+        uint256[] memory heldBefore = new uint256[](tokens.length);
+        uint256[] memory balancesBefore = new uint256[](tokens.length);
         bool holdsValue = index.idleImd() > 0;
-        for (uint256 i = 0; i < tokens.length && !holdsValue; ++i) {
-            holdsValue = index.held(tokens[i]) > 0;
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            heldBefore[i] = index.held(tokens[i]);
+            balancesBefore[i] = MockERC20(tokens[i]).balanceOf(address(index));
+            holdsValue = holdsValue || heldBefore[i] > 0;
         }
         vm.prank(who);
         try index.mint(shares, maxIn) {
             uint256 paid = imdBefore - imd.balanceOf(who);
-            require(index.balanceOf(who) == sharesBefore + shares, "wrong shares minted");
+            uint256 minted = index.balanceOf(who) - sharesBefore;
+            require(minted > 0 && minted <= shares, "invalid shares minted");
+            uint256 expected = shares;
+            for (uint256 i; i < tokens.length; ++i) {
+                uint256 need = Math.mulDiv(heldBefore[i], shares, supply, Math.Rounding.Ceil);
+                if (need == 0) continue;
+                uint256 received = MockERC20(tokens[i]).balanceOf(address(index)) - balancesBefore[i];
+                expected = Math.min(expected, Math.mulDiv(shares, received, need));
+                require(heldBefore[i] * minted <= received * supply, "mint diluted an existing holding");
+            }
+            require(minted == expected, "wrong delivered fraction minted");
             require(paid <= maxIn, "mint pulled more than maxImdIn");
             require(index.feeImd() >= feeBefore, "mint reduced feeImd");
             if (paid == 0) ghostFreeMints += 1;
@@ -343,7 +359,7 @@ contract Imdex5InvariantTest is Imdex5Base {
     uint256 initialActorImd;
     uint256 initialPoolImd;
 
-    function setUp() public {
+    function setUp() public virtual {
         _deployAll();
         address[] memory actors = new address[](3);
         actors[0] = alice;
@@ -480,5 +496,13 @@ contract Imdex5InvariantTest is Imdex5Base {
             assertLe(index.openSince(), block.timestamp);
         }
         assertLe(index.lastAsk(), block.timestamp);
+    }
+}
+
+/// @dev Keep all original invariants and also exercise them with the starting list's 2% tax.
+contract Imdex5TaxedCoinInvariantTest is Imdex5InvariantTest {
+    function setUp() public override {
+        super.setUp();
+        vm.etch(tokens[4], address(new PoolTaxERC20(address(pm))).code);
     }
 }

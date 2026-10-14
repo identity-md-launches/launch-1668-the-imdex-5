@@ -317,7 +317,7 @@ contract Imdex5Test is Test {
         assertEq(imd.balanceOf(bob), 10_000e18);
     }
 
-    function test_mintRevertsWhenABuyFailsOrFillsShort() public {
+    function test_mintRevertsWhenABuyFailsButScalesANonzeroShortFill() public {
         _mintFirst(alice, 1000e18);
         pm.setDead(_key(tokens[1], hooks[1]), true);
         vm.prank(bob);
@@ -325,9 +325,20 @@ contract Imdex5Test is Test {
         index.mint(100e18, 3000e18);
         pm.setDead(_key(tokens[1], hooks[1]), false);
         pm.setShortBy(_key(tokens[1], hooks[1]), 1);
+        uint256 heldBefore = index.held(tokens[1]);
+        uint256 supply = index.totalSupply();
+        uint256 need = (heldBefore * 100e18 + supply - 1) / supply;
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(Imdex5.BuyFailed.selector, tokens[1]));
         index.mint(100e18, 3000e18);
+        // The corrected launch issues only the delivered fraction, even for a one-wei shortfall.
+        uint256 minted = 100e18 * (need - 1) / need;
+        assertEq(index.balanceOf(bob), minted);
+        assertLt(minted, 100e18);
+        assertEq(index.totalSupply(), supply + minted);
+        assertEq(index.held(tokens[1]), heldBefore + need - 1);
+        for (uint256 i; i < 5; ++i) {
+            assertEq(MockERC20(tokens[i]).balanceOf(address(index)), index.held(tokens[i]));
+        }
     }
 
     function test_mintRoundsAgainstTheMinter() public {
