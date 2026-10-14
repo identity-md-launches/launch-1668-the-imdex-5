@@ -93,10 +93,14 @@ contract Imdex5TaxEverywhereTest is Imdex5Base {
         assertGt(minted, 0);
         assertEq(index.totalSupply(), supply + minted);
         uint256 cost = imd.balanceOf(address(pm)) - poolImdBefore;
-        uint256 idlePart = Math.mulDiv(idleBefore, shares, supply, Math.Rounding.Ceil);
+        // the idle contribution follows the shares issued (revision 2), rounded up, never the
+        // shares asked for: a short fill must not charge idle IMD the new shares do not own
+        uint256 idlePart = Math.mulDiv(idleBefore, minted, supply, Math.Rounding.Ceil);
         uint256 fee = Math.mulDiv(cost, 50, 10_000, Math.Rounding.Ceil);
         assertEq(payerBefore - imd.balanceOf(who), cost + idlePart + fee, "every buy must be paid");
+        assertEq(index.idleImd() - idleBefore, idlePart, "idle charged other than the issued fraction");
         assertLe(idleBefore * minted, idlePart * supply, "minted more than the idle contribution backs");
+        assertLe(idlePart, Math.mulDiv(idleBefore, shares, supply, Math.Rounding.Ceil), "a short fill overpaid idle");
         _assertAccounting();
     }
 
@@ -324,7 +328,11 @@ contract Imdex5TaxEverywhereTest is Imdex5Base {
         index.redeemToImd(300e18, 0);
         assertEq(MockERC20(tokens[4]).balanceOf(address(pm)), poolCoinBefore, "the pool received a failed sell");
         assertEq(index.held(tokens[4]), heldBefore - paid, "the unpaid half percent did not stay held");
-        assertEq(MockERC20(tokens[4]).balanceOf(alice), paid - paid * 300 / 10_000, "the coin taxes the holder, not the index");
+        assertEq(
+            MockERC20(tokens[4]).balanceOf(alice),
+            paid - paid * 300 / 10_000,
+            "the coin taxes the holder, not the index"
+        );
         assertEq(index.owed(alice, tokens[4]), 0);
         _assertAccounting();
         _redeemAllAndCheck(alice);
@@ -353,7 +361,9 @@ contract Imdex5TaxEverywhereTest is Imdex5Base {
         // later mints skip nothing: the residual is still bought pro rata and credited net
         uint256 need = Math.mulDiv(heldBefore, 100e18, index.totalSupply(), Math.Rounding.Ceil);
         uint256 minted = _mintAndCheck(bob, 100e18);
-        assertEq(minted, Math.mulDiv(100e18, need - need * 300 / 10_000, need), "the residual's tax did not reduce the mint");
+        assertEq(
+            minted, Math.mulDiv(100e18, need - need * 300 / 10_000, need), "the residual's tax did not reduce the mint"
+        );
         _redeemAllAndCheck(alice);
         _redeemAllAndCheck(bob);
         _assertCleared();
