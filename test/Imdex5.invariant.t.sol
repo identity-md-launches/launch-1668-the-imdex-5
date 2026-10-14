@@ -118,7 +118,8 @@ contract Imdex5Handler is CommonBase, StdUtils {
         uint256 sharesBefore = index.balanceOf(who);
         uint256[] memory heldBefore = new uint256[](tokens.length);
         uint256[] memory balancesBefore = new uint256[](tokens.length);
-        bool holdsValue = index.idleImd() > 0;
+        uint256 idleBefore = index.idleImd();
+        bool holdsValue = idleBefore > 0;
         for (uint256 i = 0; i < tokens.length; ++i) {
             heldBefore[i] = index.held(tokens[i]);
             balancesBefore[i] = MockERC20(tokens[i]).balanceOf(address(index));
@@ -138,6 +139,10 @@ contract Imdex5Handler is CommonBase, StdUtils {
                 require(heldBefore[i] * minted <= received * supply, "mint diluted an existing holding");
             }
             require(minted == expected, "wrong delivered fraction minted");
+            require(
+                index.idleImd() - idleBefore == Math.mulDiv(idleBefore, minted, supply, Math.Rounding.Ceil),
+                "idle charged other than the issued shares' fraction"
+            );
             require(paid <= maxIn, "mint pulled more than maxImdIn");
             require(index.feeImd() >= feeBefore, "mint reduced feeImd");
             if (paid == 0) ghostFreeMints += 1;

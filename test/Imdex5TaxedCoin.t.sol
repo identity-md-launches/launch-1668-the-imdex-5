@@ -102,11 +102,13 @@ contract Imdex5TaxedCoinTest is Imdex5Base {
         uint256 poolImdBefore = imd.balanceOf(address(pm));
         uint256 payerBefore = imd.balanceOf(who);
         uint256 sharesBefore = index.balanceOf(who);
-        uint256 idlePart = Math.mulDiv(idleBefore, shares, supply, Math.Rounding.Ceil);
         vm.recordLogs();
         vm.prank(who);
         index.mint(shares, 2000e18);
         minted = index.balanceOf(who) - sharesBefore;
+        // the idle contribution follows the shares issued, not the shares asked for
+        uint256 idlePart = Math.mulDiv(idleBefore, minted, supply, Math.Rounding.Ceil);
+        assertLe(idlePart, Math.mulDiv(idleBefore, shares, supply, Math.Rounding.Ceil));
         uint256 need = Math.mulDiv(beforeHeld[4], shares, supply, Math.Rounding.Ceil);
         uint256 received = need - need * 2 / 100;
         uint256 expected = Math.mulDiv(shares, received, need);
@@ -123,10 +125,14 @@ contract Imdex5TaxedCoinTest is Imdex5Base {
         uint256 fee = Math.mulDiv(cost, 50, 10_000, Math.Rounding.Ceil);
         uint256 paid = payerBefore - imd.balanceOf(who);
         assertGt(cost, 0);
-        assertEq(paid, cost + idlePart + fee, "all buys and the full idle contribution must be charged");
+        assertEq(paid, cost + idlePart + fee, "all buys and the issued shares' idle contribution must be charged");
         assertEq(index.feeImd(), feeBefore + fee);
         assertEq(index.idleImd(), idleBefore + idlePart);
         assertLe(idleBefore * minted, idlePart * supply);
+        // the minter's pro-rata idle claim right after the mint equals what it deposited, to rounding
+        uint256 claim = Math.mulDiv(index.idleImd(), minted, index.totalSupply());
+        assertLe(claim, idlePart);
+        assertLe(idlePart - claim, 2, "idle charged beyond the issued shares' fraction");
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bool found;
         for (uint256 i; i < logs.length; ++i) {

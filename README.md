@@ -12,7 +12,7 @@ Contracts only: no launch token, pool or website.
 
 | Path | What |
 | --- | --- |
-| `src/Imdex5.sol` | The index. One contract, no constructor arguments, 22,656 bytes of runtime. |
+| `src/Imdex5.sol` | The index. One contract, no constructor arguments, 22,662 bytes of runtime. |
 | `src/OracleAttestation.sol` | The protocol's `OracleAttestation` library and `OracleAttestationConsumer`, copied whole from the oracle-consumer reference. |
 | `src/Interfaces.sol` | The slices of the Uniswap v4 `PoolManager`, the launch registries and the Intake that the index calls. |
 | `test/Imdex5.t.sol` | Behaviour, failure and attack tests against mocks. |
@@ -102,10 +102,12 @@ The invariant suites check these equalities with both plain coins and a SwarmCit
   dust input the pool fee swallows whole is a failed buy, not a share for nothing) or returns
   under its `minOut`. `minOut` has one entry per coin of the list, in list order.
 - `mint(shares, maxImdIn)`: supply > 0. Pulls `maxImdIn` first, requests exactly `held * f` of every
-  coin (`f = shares / totalSupply`, rounded up), adds `idleImd * f` (rounded up) to `idleImd`,
-  adds 0.50% of the buys' cost to `feeImd`, mints, and refunds the unspent IMD. Starts with
-  `minted = shares`; for each short fill, reduces it to the smaller of its current value and
-  `floor(shares * received / need)`. It issues and emits `minted`. Reverts if the total exceeds
+  coin (`f = shares / totalSupply`, rounded up), adds 0.50% of the buys' cost to `feeImd`, mints,
+  and refunds the unspent IMD. Starts with `minted = shares`; for each short fill, reduces it to
+  the smaller of its current value and `floor(shares * received / need)`. Then adds
+  `idleImd * minted / totalSupply` (rounded up) to `idleImd`: the idle contribution follows the
+  shares issued, not the shares asked for, so a short fill never charges idle IMD the new shares
+  do not own. It issues and emits `minted`. Reverts if the total exceeds
   `maxImdIn`, if the total is zero (a share is never issued for nothing), if a buy reverts or
   delivers nothing, or if the resulting shares round to zero. No price is read; no cap.
   A list coin whose holding is zero (its
@@ -114,11 +116,18 @@ The invariant suites check these equalities with both plain coins and a SwarmCit
 
 While SwarmCity is held, its 2% transfer tax normally means about 98% of the requested later-mint
 shares are issued (subject to integer rounding). The buyer still pays for every buy made, the
-idle IMD contribution calculated from the requested shares, and the 0.50% fee on the buys' cost.
-Other coins bought in excess of the issued fraction remain backing the index for its holders.
+idle IMD contribution for the shares issued, and the 0.50% fee on the buys' cost. Other coins
+bought in excess of the issued fraction remain backing the index for its holders.
 `maxImdIn` limits the payment; it is not a minimum-share guarantee. Read `Minted.shares` for the
 amount actually issued. The first mint's share calculation remains IMD paid less its 0.50% fee;
 its coin receipts and `minOut` checks use the amounts actually received.
+
+There is no minimum-shares floor, by the brief ("no new safeguard"). A buy that delivers only a
+sliver of one coin, because that pool's liquidity is one-sided, bounded or was withdrawn just
+before the mint, issues only that sliver's fraction of the requested shares while the exact-output
+buys of the other coins are still paid in full; the excess stays with the existing holders. A
+minter who cannot tolerate that should mint in a private transaction or check the pools' depth
+first. `maxImdIn` caps the payment but a short fill lowers the total, so it does not refuse one.
 
 ### Redeem
 
@@ -175,9 +184,13 @@ its own unsettled, which the manager would otherwise only reject at the end of `
 undoing the whole rebalance. The caller gets 0.25 IMD from `feeImd` if it can pay.
 
 `ask()` may be called again 7 days after the last ask even when an answer was delivered but
-nobody submitted it; the new answer then replaces the old one. This is deliberate: an answer
-whose `submit` can never succeed (a launch number no registry records, a missing artifact) must
-not block the oracle loop forever, and the cost is bounded to the normal weekly 0.75 IMD.
+nobody submitted it; opening the new request clears the old answer's hash, so the week-old
+attestation can no longer be submitted (it would otherwise rebalance the index twice in one
+cycle: once on the stale list while the new request is open, once on the new one). This is
+deliberate: an answer whose `submit` can never succeed (a launch number no registry records, a
+missing artifact) must not block the oracle loop forever, and the cost is bounded to the normal
+weekly 0.75 IMD. If the new request fails or times out, no answer is left; the loop waits for the
+next interval as after any failed round.
 
 ## Security notes
 
@@ -198,12 +211,20 @@ not block the oracle loop forever, and the cost is bounded to the normal weekly 
   attestation fails the signature; a tampered field changes the digest.
 
 Accepted, by the brief: thin-pool price impact, a pool's own hook fee, a dead pool blocking mint
-(never redeem), and an oracle that never answers. A hook that burns gas or leaves a delta
-unsettled for the index's swaps makes that swap a skipped one in `rebalance` and an in-kind
-payment in `redeemToImd`; in `mint` and `mintFirst` it is a failed buy, which reverts, as a dead
-pool does. `submit` checks only the stored hash and the signature, as the brief asks, not the
-attestation's `expiresAt`: the hash already binds the answer to the index's own request, and the
-hash is cleared once a list is stored, so an attestation is taken once.
+(never redeem), a short fill that issues fewer shares than asked (above), and an oracle that
+never answers. A hook that burns gas or leaves a delta unsettled for the index's swaps makes that
+swap a skipped one in `rebalance` and an in-kind payment in `redeemToImd`; in `mint` and
+`mintFirst` it is a failed buy, which reverts, as a dead pool does. That includes a leftover: a
+coin that left the list but could not be sold stays in the holdings so it is still redeemed, and
+`mint` buys its fraction like any other holding, so while its pool is dead every `mint` reverts
+until the pool works again and a rebalance sells it; `redeem` and `redeemToImd` keep working. Such
+leftovers also stay in the holdings until sold, so each unsellable leaver adds one coin to the
+redeem, mint and rebalance loops; at the list's size (five coins, at most five leavers per
+weekly rebalance) the cost grows slowly and `redeem` has `PAY_GAS` per coin, never more.
+`submit` checks only the stored hash and the signature, as the brief asks, not the attestation's
+`expiresAt`: the hash already binds the answer to the index's own request, and the hash is
+cleared once a list is stored or a new request opens, so an attestation is taken once and only
+for the cycle that produced it.
 
 Gas to supply: `rebalance` needs at most `SWAP_GAS` per swap it attempts (up to 5 sales of
 leavers, one trim per holding and one buy per list coin) plus a few hundred thousand; `redeem`
@@ -233,12 +254,13 @@ validation details are in `ADAPTATION.md`.
 
 | File | Change and reason |
 | --- | --- |
-| `src/Imdex5.sol` | `_swap` measures the balance increase around `take`, returning and emitting the actual receipt so transfer tax cannot inflate holdings. `_mintMore` issues the least delivered fraction of requested shares, rejects zero output/zero resulting shares, and emits the actual shares while charging all buys and the original idle contribution and fees. The mint NatSpec describes this behavior. |
+| `src/Imdex5.sol` | `_swap` measures the balance increase around `take`, returning and emitting the actual receipt so transfer tax cannot inflate holdings. `_mintMore` issues the least delivered fraction of requested shares, rejects zero output/zero resulting shares, and emits the actual shares while charging all buys and fees; its idle IMD contribution is `idleImd * minted / supply` (rounded up), computed after the buys, so a short fill is not charged the requested fraction of idle IMD for fewer shares (review finding, revision 2). `ask()` clears `answerHash` when it opens a new request, so an unsubmitted answer of the previous cycle cannot be submitted and rebalanced on while the new request is open (review finding, revision 2). The mint NatSpec describes this behavior. |
 | `test/mocks/Mocks.sol` | Makes the mock's `transfer` public and virtual so the taxed mock can reuse its balances and failure modes. Plain-token behavior is unchanged. |
 | `test/mocks/PoolTaxERC20.sol` | Adds a mock that keeps 2% of transfers from the PoolManager; transfers from the index remain untaxed. |
 | `test/Imdex5.t.sol` | Replaces the obsolete nonzero short-fill revert expectation with fractional issuance and balance assertions; retains the failed-buy revert check. |
-| `test/Imdex5ShortFill.t.sol` | Adds deterministic and fuzz tests for short fills, the least fill across all coins, full payment and refunds, zero output, zero rounded shares, payment limits and atomic rollback. |
-| `test/Imdex5TaxedCoin.t.sol` | Adds the first receipt and last-holder regressions, the complete three-holder lifecycle with two later mints and an IMD exit, fuzzed lifecycles, actual-output events and minimums, rebalance buys, and funded owed/claim coverage. Each lifecycle step checks balances against held plus owed; each mint checks backing against every holding. |
-| `test/Imdex5.invariant.t.sol` | Checks minted shares against actual receipts and proportional backing; runs the existing invariants both with plain tokens and with the taxed SwarmCity mock. The held-plus-owed invariant is retained. |
+| `test/Imdex5ShortFill.t.sol` | Adds deterministic and fuzz tests for short fills, the least fill across all coins, full payment and refunds, zero output, zero rounded shares, payment limits and atomic rollback. Revision 2: the idle contribution of a short fill equals the issued shares' fraction and the minter's pro-rata idle claim equals its deposit to rounding; a sliver fill issues a sliver, pays every buy and dilutes nobody. |
+| `test/Imdex5TaxedCoin.t.sol` | Adds the first receipt and last-holder regressions, the complete three-holder lifecycle with two later mints and an IMD exit, fuzzed lifecycles, actual-output events and minimums, rebalance buys, and funded owed/claim coverage. Each lifecycle step checks balances against held plus owed; each mint checks backing against every holding and, since revision 2, that idle IMD is charged for the shares issued. |
+| `test/Imdex5.invariant.t.sol` | Checks minted shares against actual receipts and proportional backing (and, since revision 2, the idle contribution against the shares issued); runs the existing invariants both with plain tokens and with the taxed SwarmCity mock. The held-plus-owed invariant is retained. |
+| `test/Imdex5Edges.t.sol` | Revision 2: a later ask drops the unsubmitted answer at once, so the stale attestation is rejected while the new request is open and after the new request fails. |
 | `README.md` | Updates the measured runtime size, corrects accounting and mint descriptions, documents the short-fill payment consequence and lists this change set. |
 | `ADAPTATION.md` | Records the changes, imported findings, reproductions, unchanged launch requirements and local validation. |

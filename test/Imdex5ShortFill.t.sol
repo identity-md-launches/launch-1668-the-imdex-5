@@ -70,6 +70,76 @@ contract Imdex5ShortFillTest is Imdex5Base {
         _assertImdAccounting();
     }
 
+    /// @dev The idle IMD contribution follows the shares issued: a short fill must not charge
+    /// the requested fraction of idle IMD for fewer shares.
+    function test_shortFillChargesIdleImdForTheSharesIssuedOnly() public {
+        // start again with idle IMD behind the shares: pools that take at most 100 IMD per swap
+        _redeemEverything();
+        for (uint256 i; i < 5; ++i) {
+            pm.setMaxIn(_key(tokens[i], hooks[i]), 100e18);
+        }
+        _mintFirst(alice, 1000e18);
+        for (uint256 i; i < 5; ++i) {
+            pm.setMaxIn(_key(tokens[i], hooks[i]), 0);
+        }
+        uint256 idleBefore = index.idleImd();
+        uint256 supply = index.totalSupply();
+        assertEq(idleBefore, 495e18);
+        assertEq(supply, 995e18);
+        uint256 need = Math.mulDiv(index.held(tokens[4]), 100e18, supply, Math.Rounding.Ceil);
+        uint256 out = need - need * 2 / 100;
+        pm.setShortBy(_key(tokens[4], hooks[4]), need - out);
+        vm.prank(bob);
+        index.mint(100e18, 2000e18);
+        uint256 minted = index.balanceOf(bob);
+        assertEq(minted, Math.mulDiv(100e18, out, need));
+        assertLe(minted, 98e18);
+        uint256 idlePart = index.idleImd() - idleBefore;
+        assertEq(idlePart, Math.mulDiv(idleBefore, minted, supply, Math.Rounding.Ceil));
+        // the requested fraction would have been ceil(495e18 * 100e18 / 995e18) = 49748743718592964825
+        assertLt(idlePart, 49748743718592964825);
+        assertLe(idlePart, Math.mulDiv(idleBefore, 98e18, supply, Math.Rounding.Ceil));
+        // bob's pro-rata idle claim right after the mint is what bob deposited, to rounding
+        uint256 claim = Math.mulDiv(index.idleImd(), minted, index.totalSupply());
+        assertLe(idlePart - claim, 2);
+        _assertImdAccounting();
+    }
+
+    /// @dev A buy that delivers a sliver issues a sliver of shares while the other buys are still
+    /// paid in full: the minter is never over-issued and the holders are never diluted, but there
+    /// is no minimum-shares floor. The brief keeps it that way; see the README.
+    function test_sliverFillIssuesASliverAndChargesEveryBuy() public {
+        uint256 supply = index.totalSupply();
+        uint256[] memory heldBefore = _holdings();
+        uint256 need0 = Math.mulDiv(heldBefore[0], 100e18, supply, Math.Rounding.Ceil);
+        uint256 out0 = 1e15;
+        pm.setShortBy(_key(tokens[0], hooks[0]), need0 - out0);
+        uint256 cost;
+        for (uint256 i; i < 5; ++i) {
+            cost += _costOf(tokens[i], hooks[i], Math.mulDiv(heldBefore[i], 100e18, supply, Math.Rounding.Ceil));
+        }
+        uint256 fee = Math.mulDiv(cost, 50, 10_000, Math.Rounding.Ceil);
+        vm.prank(bob);
+        index.mint(100e18, 2000e18);
+        uint256 minted = index.balanceOf(bob);
+        assertEq(minted, Math.mulDiv(100e18, out0, need0));
+        assertLt(minted, 1e14);
+        assertEq(10_000e18 - imd.balanceOf(bob), cost + fee, "every buy made is paid");
+        for (uint256 i; i < 5; ++i) {
+            uint256 added = index.held(tokens[i]) - heldBefore[i];
+            assertLe(heldBefore[i] * minted, added * supply, "mint diluted an existing holding");
+            assertEq(MockERC20(tokens[i]).balanceOf(address(index)), index.held(tokens[i]));
+        }
+        _assertImdAccounting();
+    }
+
+    function _redeemEverything() internal {
+        uint256 all = index.balanceOf(alice);
+        vm.prank(alice);
+        index.redeem(all);
+        assertEq(index.totalSupply(), 0);
+    }
+
     function _assertMintRolledBack(uint256[] memory heldBefore, uint256 poolImdBefore) internal view {
         assertEq(index.balanceOf(bob), 0);
         assertEq(index.totalSupply(), 995e18);

@@ -183,10 +183,10 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
     }
 
     /// @notice Mints up to `shares` by buying the proportional amount of every coin, plus the
-    /// proportional idle IMD, plus 0.50% of the buys' cost as fee. `maxImdIn` is pulled first and
-    /// the unspent part refunded. Short fills reduce shares to the least delivered fraction;
-    /// every buy is still paid. Reverts if the cost exceeds the limit, is nothing, a buy fails,
-    /// a buy delivers nothing, or the delivered fraction rounds to zero shares.
+    /// idle IMD proportional to the shares issued, plus 0.50% of the buys' cost as fee. `maxImdIn`
+    /// is pulled first and the unspent part refunded. Short fills reduce shares to the least
+    /// delivered fraction; every buy is still paid. Reverts if the cost exceeds the limit, is
+    /// nothing, a buy fails, a buy delivers nothing, or the delivered fraction rounds to zero shares.
     function mint(uint256 shares, uint256 maxImdIn) external nonReentrant {
         if (totalSupply() == 0) revert FirstMintOnly();
         if (shares == 0) revert ZeroAmount();
@@ -251,6 +251,8 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
         feeImd -= ORACLE_PRICE + REWARD;
         lastAsk = uint64(block.timestamp);
         openSince = uint64(block.timestamp);
+        // an answer of the previous cycle nobody submitted is stale once a new request opens
+        answerHash = 0;
         IERC20(IMD).forceApprove(INTAKE, ORACLE_PRICE);
         bytes32 requestId = IIntake(INTAKE)
             .requestWithFailure(
@@ -401,7 +403,7 @@ contract Imdex5 is ERC20, ReentrancyGuard, OracleAttestationConsumer, IUnlockCal
             cost += amountIn;
             held[coin.token] += out;
         }
-        uint256 idlePart = Math.mulDiv(idleImd, shares, supply, Math.Rounding.Ceil);
+        uint256 idlePart = Math.mulDiv(idleImd, minted, supply, Math.Rounding.Ceil);
         idleImd += idlePart;
         uint256 fee = Math.mulDiv(cost, FEE_BPS, BPS, Math.Rounding.Ceil);
         feeImd += fee;

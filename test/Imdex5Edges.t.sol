@@ -154,12 +154,21 @@ contract Imdex5EdgesTest is Imdex5Base {
         index.ask();
         OracleAttestation.Attestation memory first = _attestation(_launches(3));
         _deliver(first);
+        bytes memory firstSig = _sign(first);
         vm.warp(block.timestamp + 7 days);
         vm.prank(bob);
         index.ask();
+        // the week-old answer is stale the moment the new request opens, not only once the new
+        // answer arrives: submitting it now would rebalance twice in one cycle
+        assertGt(index.openSince(), 0);
+        assertLt(first.expiresAt, block.timestamp);
+        assertEq(index.answerHash(), bytes32(0), "a new ask must drop the unsubmitted answer");
+        vm.prank(carol);
+        vm.expectRevert(Imdex5.WrongAnswer.selector);
+        index.submit(first, firstSig);
+        assertEq(index.nextList().length, 0);
         OracleAttestation.Attestation memory second = _attestation(_launches(4));
         _deliver(second);
-        bytes memory firstSig = _sign(first);
         bytes memory secondSig = _sign(second);
         vm.prank(carol);
         vm.expectRevert(Imdex5.WrongAnswer.selector);
@@ -167,6 +176,33 @@ contract Imdex5EdgesTest is Imdex5Base {
         vm.prank(carol);
         index.submit(second, secondSig);
         assertEq(index.nextList().length, 4);
+    }
+
+    /// @dev A new ask that fails or times out leaves no answer at all: the old one is gone and
+    /// the loop waits for the next interval, as it does after any failed round.
+    function test_anUnsubmittedAnswerDoesNotSurviveAFailedLaterAsk() public {
+        vm.prank(alice);
+        index.fund(5e18);
+        vm.prank(bob);
+        index.ask();
+        OracleAttestation.Attestation memory first = _attestation(_launches(3));
+        _deliver(first);
+        bytes memory firstSig = _sign(first);
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(bob);
+        index.ask();
+        bytes32 id = intake.lastRequestId();
+        vm.prank(address(intake));
+        index.onOracleFailure(id, 2, bytes32("disagreed"), 2, 5, "");
+        assertEq(index.openSince(), 0);
+        assertEq(index.answerHash(), bytes32(0));
+        vm.prank(carol);
+        vm.expectRevert(Imdex5.WrongAnswer.selector);
+        index.submit(first, firstSig);
+        // an ask that returns without opening a request (fees short) changes nothing
+        vm.prank(bob);
+        vm.expectRevert(Imdex5.AskTooSoon.selector);
+        index.ask();
     }
 
     // ---- attestation forgeries ----
